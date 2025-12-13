@@ -8,46 +8,88 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 页面基础设置 ---
-st.set_page_config(page_title="BioInfo Tool Pro v3.4", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="BioInfo Tool Pro v3.3", layout="wide", page_icon="🧬")
 
-st.title("🧬 基因组学多功能工具 (v3.4 - 强力桥接版)")
+st.title("🧬 基因组学多功能工具 (v3.3 - 终极稳定性版)")
 st.markdown("""
-**核心修复：** 引入“强制翻译”机制。先将输入转换为标准 Ensembl ID，再进行富集分析，解决 g:Profiler 无法识别基因名导致结果为空的问题。
+**错误修复：** 针对富集分析结果返回结构进行了最严格的类型检查和安全访问，彻底消除 `list indices must be integers or slices, not str` 错误。
 """)
 
-# --- 全局物种映射 ---
+# --- 全局物种映射 (保持不变) ---
 species_map = {
     "Human (Homo sapiens)": (9606, 'hsapiens'),
     "Mouse (Mus musculus)": (10090, 'mmusculus'),
     "Rat (Rattus norvegicus)": (10116, 'rnorvegicus')
 }
 
+# --- 侧边栏：全局物种 ---
 st.sidebar.header("🛠️ 全局设置")
 selected_species_key = st.sidebar.selectbox("选择物种:", options=list(species_map.keys()))
 species_id, gprofiler_organism_code = species_map[selected_species_key]
 
-# --- 辅助函数 ---
+# --- 辅助函数 (保持不变) ---
 def clean_cell_data(cell):
     if isinstance(cell, list):
         cleaned_list = [str(item) if not isinstance(item, dict) else f"{item.get('chr','N/A')}:{item.get('start','N/A')}" for item in cell]
         return "; ".join(cleaned_list)
     return str(cell) if isinstance(cell, dict) else cell
 
-# --- Tabs ---
-tab1, tab2 = st.tabs(["1. 基因 ID 转换", "2. 富集分析 (修复核心)"])
+# --- 主体 Tabs (保持不变) ---
+tab1, tab2 = st.tabs(["1. 基因 ID 转换与注释", "2. 富集分析与可视化 (Debug)"])
 
 # =================================================================================
-# Tab 1: ID 转换 (保持不变)
+# Tab 1: 基因 ID 转换 (保持不变，避免引入新错误)
 # =================================================================================
 with tab1:
-    st.header("功能一：ID 转换")
-    # (为了节省篇幅，Tab 1 代码保持原样，功能未变)
-    st.info("此标签页功能保持不变，请直接使用 Tab 2 进行富集分析。")
+    # --- (此处代码逻辑与 v3.2 相同，为节省篇幅，省略但请在实际文件中保留) ---
+    st.markdown("ID 转换功能代码保持不变...")
     
-    # 简单的占位逻辑，确保不报错，实际使用时请保留 v3.3 的完整代码或只需关注 Tab 2
-    raw_text_t1 = st.text_area("输入基因 ID:", key="t1_simple")
-    if st.button("转换测试", key="t1_btn_simple"):
-        st.write("请前往 Tab 2 使用升级后的富集分析功能。")
+    field_mapping = {
+        '基因全名 (Name)': 'name', '别名 (Alias)': 'alias', 
+        '功能简介 (Summary)': 'summary', '基因类型 (Type)': 'type_of_gene', 
+        '染色体位置 (Pos)': 'genomic_pos'
+    }
+    col_t1_1, col_t1_2 = st.columns([1, 1])
+    with col_t1_2:
+        add_info = st.multiselect("添加额外注释:", options=list(field_mapping.keys()), default=['基因全名 (Name)'])
+    
+    query_fields = ['symbol', 'entrezgene', 'ensembl.gene'] + [field_mapping[i] for i in add_info]
+    
+    input_method = st.radio("输入方式:", ("直接粘贴文本", "上传 Excel/CSV 文件"), key="t1_method")
+    gene_list = []
+    df_input = None
+    col_name = "Input_ID"
+
+    if input_method == "直接粘贴文本":
+        raw_text = st.text_area("输入基因 ID (每行一个):", height=100, key="t1_text")
+        if raw_text:
+            gene_list = [x.strip() for x in raw_text.split('\n') if x.strip()]
+            df_input = pd.DataFrame({col_name: gene_list})
+    else:
+        uploaded_file = st.file_uploader("上传文件", type=['xlsx', 'csv'], key="t1_file")
+        if uploaded_file:
+            if uploaded_file.name.endswith('.csv'): df_input = pd.read_csv(uploaded_file)
+            else: df_input = pd.read_excel(uploaded_file)
+            col_name = st.selectbox("选择 ID 列:", df_input.columns)
+            gene_list = df_input[col_name].dropna().astype(str).tolist()
+
+    if st.button("🚀 开始转换", key="t1_btn"):
+        if not gene_list: st.warning("请输入基因 ID")
+        else:
+            with st.spinner("查询中..."):
+                try:
+                    mg = mygene.MyGeneInfo()
+                    res = mg.querymany(gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields=query_fields, species=species_id, as_dataframe=True)
+                    df_res = res.reset_index()
+                    for col in df_res.columns: df_res[col] = df_res[col].apply(clean_cell_data)
+                    if input_method == "直接粘贴文本": final_df = df_res
+                    else: final_df = pd.merge(df_input, df_res, left_on=col_name, right_on='query', how='left')
+                    st.dataframe(final_df)
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer: final_df.to_excel(writer, index=False)
+                    st.download_button("📥 下载 Excel", output.getvalue(), "gene_conversion.xlsx")
+                except Exception as e: st.error(f"Error: {e}")
+
 
 # =================================================================================
 # Tab 2: 富集分析 (强力桥接逻辑)
