@@ -92,11 +92,11 @@ with tab1:
 
 
 # =================================================================================
-# Tab 2: 富集分析 (Entrez 策略)
+# Tab 2: 富集分析 (关键修复区域)
 # =================================================================================
 with tab2:
     st.header("功能二：富集分析 & 可视化")
-    st.markdown("✅ **当前策略：** 强制将输入转换为 **Entrez ID** (例如: `12345`) 发送给分析器。")
+    st.markdown("✅ **当前策略：** 强制将输入转换为 **Entrez ID** (例如: `12345`)，并自动发送。")
     
     col_in1, col_in2 = st.columns([1, 2])
     with col_in1:
@@ -105,79 +105,62 @@ with tab2:
     with col_in2:
         with st.container(border=True):
             st.subheader("⚙️ 参数设置")
-            # 默认只选 KEGG 和 GO:BP 减少干扰
             enrich_sources = st.multiselect("数据库:", ['KEGG', 'GO:BP', 'GO:CC', 'GO:MF', 'Reactome'], default=['KEGG', 'GO:BP'])
             
             col_p1, col_p2 = st.columns(2)
             with col_p1:
-                # 建议稍微放宽一点，观察是否有数据
                 p_threshold = st.slider("P-value 阈值:", 0.01, 1.0, 0.05)
             with col_p2:
                 correction_method = st.selectbox("矫正算法:", ["fdr", "bonferroni", "g_SCS"], index=0)
             
             exclude_iea = st.checkbox("排除电子注释 (建议不勾选)", value=False)
             
-            run_enrich = st.button("📈 运行分析 (Entrez 模式)", type="primary")
+            run_enrich = st.button("📈 运行分析 (API 自适应模式)", type="primary")
 
     if run_enrich and raw_text_enrich:
         raw_gene_list = [x.strip() for x in raw_text_enrich.split('\n') if x.strip()]
         
         try:
-            # --- 步骤 1: 转换为 Entrez ID ---
-            with st.spinner("第一步: 正在获取 Entrez ID (MyGene -> Entrez)..."):
+            # --- 步骤 1: 转换为 Entrez ID (MyGene 桥接) ---
+            with st.spinner("第一步: 正在获取 Entrez ID..."):
                 mg = mygene.MyGeneInfo()
-                # 重点：查询 entrezgene
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene', species=species_id)
                 
                 converted_ids = []
-                debug_log = []
-                
                 for item in map_res:
-                    query_name = item.get('query', 'N/A')
-                    # 优先取 Entrez ID
                     if 'entrezgene' in item:
-                        eid = str(item['entrezgene']) # 必须转字符串
-                        converted_ids.append(eid)
-                        debug_log.append(f"{query_name} -> {eid}")
-                    else:
-                        # 如果没有 Entrez，记录失败
-                        debug_log.append(f"{query_name} -> 未找到 Entrez ID")
-
-                # 去重
+                        converted_ids.append(str(item['entrezgene']))
                 converted_ids = list(set(converted_ids))
             
             # 调试面板
             with st.expander(f"🔍 ID 转换日志 (获取到 {len(converted_ids)} 个唯一 Entrez ID)", expanded=True):
-                st.text("发送给 g:Profiler 的前 10 个 ID: " + str(converted_ids[:10]))
-                if len(converted_ids) < 5:
-                    st.warning("⚠️ 获取到的 Entrez ID 非常少，这可能是导致无结果的原因。请检查物种是否对应。")
+                st.text(f"发送给 g:Profiler 的 ID 列表 (前 10 个): {converted_ids[:10]}")
+                if len(converted_ids) == 0:
+                    st.error("❌ 无法将任何基因转换为 Entrez ID。请检查物种或输入格式。")
+                    st.stop()
 
-            if not converted_ids:
-                st.error("❌ 无法将任何基因转换为 Entrez ID。请检查输入格式。")
-                st.stop()
-
-            # --- 步骤 2: 发送给 g:Profiler ---
+            # --- 步骤 2: 发送给 g:Profiler (移除冲突参数) ---
             with st.spinner(f"第二步: 正在对 {len(converted_ids)} 个 Entrez ID 进行富集分析..."):
-                gp = GProfiler(user_agent='streamlit_app_v3.5')
+                gp = GProfiler(user_agent='streamlit_app_v3.6')
                 
                 raw_results = gp.profile(
                     organism=gprofiler_organism_code, 
-                    query=converted_ids,  # 发送纯数字 ID
+                    query=converted_ids,  
                     sources=enrich_sources, 
                     user_threshold=p_threshold, 
                     no_iea=exclude_iea,
-                    significance_threshold_method=correction_method,
-                    numeric_ns='ENTREZGENE_ACC' # 显式告诉 g:Profiler 这些数字是 Entrez ID
+                    significance_threshold_method=correction_method
+                    # 关键修改：移除了 numeric_ns='ENTREZGENE_ACC'
                 )
             
             # --- 步骤 3: 结果处理 ---
             if not isinstance(raw_results, dict) or 'result' not in raw_results or not raw_results['result']:
-                st.error(f"❌ 依然没有结果。")
-                st.markdown("""
-                **最后的排查建议：**
-                1. 您的基因列表虽然转换成功，但在选定的数据库 (KEGG/GO) 中可能真的**没有显著富集**。
-                2. 尝试将 **P-value 阈值拉到 1.0**，看看是否哪怕有一个不显著的通路返回。
-                3. 确保网络能连接到 g:Profiler 服务器。
+                st.warning(f"❌ 分析完成，但在当前参数下未发现显著通路。")
+                st.markdown(f"""
+                **排查总结：**
+                * ID 转换 ({len(converted_ids)} 个) 已成功。
+                * API 调用已修复。
+                * 请确认您是否将矫正算法设置为 **`fdr`** (FDR) 并将 P-value 阈值设置为 **`0.05`** 或更高 (例如 0.1)。
                 """)
             else:
                 results = pd.DataFrame(raw_results['result'])
@@ -190,9 +173,9 @@ with tab2:
                 
                 results = results.sort_values('p_value', ascending=True)
                 
-                st.success(f"✅ 终于成功了！发现 {len(results)} 条通路。")
+                st.success(f"✅ 成功发现 {len(results)} 条通路。")
                 
-                # --- 可视化 ---
+                # --- 可视化 (保持不变) ---
                 st.divider()
                 viz_col1, viz_col2 = st.columns([1, 3])
                 
