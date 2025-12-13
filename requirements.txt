@@ -1,0 +1,7 @@
+streamlit
+pandas
+mygene
+openpyxl
+xlsxwriter
+gprofiler-official
+plotly
