@@ -92,11 +92,11 @@ with tab1:
 
 
 # =================================================================================
-# Tab 2: 富集分析 (关键修复区域)
+# Tab 2: 富集分析 (Direct API 核心)
 # =================================================================================
 with tab2:
     st.header("功能二：富集分析 & 可视化")
-    st.markdown("✅ **当前策略：** 强制将输入转换为 **Entrez ID** (例如: `12345`)，并自动发送。")
+    st.markdown("✅ **技术说明：** 使用 `requests.post` 直接向 `biit.cs.ut.ee` 发送 JSON 数据，绕过 Python 库的 Bug。")
     
     col_in1, col_in2 = st.columns([1, 2])
     with col_in1:
@@ -111,18 +111,20 @@ with tab2:
             with col_p1:
                 p_threshold = st.slider("P-value 阈值:", 0.01, 1.0, 0.05)
             with col_p2:
-                correction_method = st.selectbox("矫正算法:", ["fdr", "bonferroni", "g_SCS"], index=0)
+                # 这里的 key 需要对应 API 的 value
+                correction_map = {"fdr": "fdr", "bonferroni": "bonferroni", "g_SCS": "g_SCS"}
+                correction_method = st.selectbox("矫正算法:", list(correction_map.keys()), index=0)
             
             exclude_iea = st.checkbox("排除电子注释 (建议不勾选)", value=False)
             
-            run_enrich = st.button("📈 运行分析 (API 自适应模式)", type="primary")
+            run_enrich = st.button("📈 运行分析 (Direct API)", type="primary")
 
     if run_enrich and raw_text_enrich:
         raw_gene_list = [x.strip() for x in raw_text_enrich.split('\n') if x.strip()]
         
-        try:
-            # --- 步骤 1: 转换为 Entrez ID (MyGene 桥接) ---
-            with st.spinner("第一步: 正在获取 Entrez ID..."):
+        # --- 步骤 1: 转换为 Entrez ID ---
+        with st.spinner("第一步: MyGene 获取 Entrez ID..."):
+            try:
                 mg = mygene.MyGeneInfo()
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene', species=species_id)
                 
@@ -131,91 +133,110 @@ with tab2:
                     if 'entrezgene' in item:
                         converted_ids.append(str(item['entrezgene']))
                 converted_ids = list(set(converted_ids))
-            
-            # 调试面板
-            with st.expander(f"🔍 ID 转换日志 (获取到 {len(converted_ids)} 个唯一 Entrez ID)", expanded=True):
-                st.text(f"发送给 g:Profiler 的 ID 列表 (前 10 个): {converted_ids[:10]}")
-                if len(converted_ids) == 0:
-                    st.error("❌ 无法将任何基因转换为 Entrez ID。请检查物种或输入格式。")
-                    st.stop()
-
-            # --- 步骤 2: 发送给 g:Profiler (移除冲突参数) ---
-            with st.spinner(f"第二步: 正在对 {len(converted_ids)} 个 Entrez ID 进行富集分析..."):
-                gp = GProfiler(user_agent='streamlit_app_v3.6')
                 
-                raw_results = gp.profile(
-                    organism=gprofiler_organism_code, 
-                    query=converted_ids,  
-                    sources=enrich_sources, 
-                    user_threshold=p_threshold, 
-                    no_iea=exclude_iea,
-                    significance_threshold_method=correction_method
-                    # 关键修改：移除了 numeric_ns='ENTREZGENE_ACC'
+            except Exception as e:
+                st.error(f"ID 转换失败: {e}")
+                st.stop()
+
+        # 调试面板
+        with st.expander(f"🔍 ID 转换日志 (获取到 {len(converted_ids)} 个唯一 Entrez ID)", expanded=True):
+            st.text(f"发送给 API 的 ID: {converted_ids[:10]} ...")
+            if not converted_ids:
+                st.error("❌ 无法获取 Entrez ID，请检查物种或输入。")
+                st.stop()
+
+        # --- 步骤 2: 原生 API 调用 (The Nuclear Option) ---
+        with st.spinner("第二步: 调用 g:Profiler 官方 API..."):
+            try:
+                # 构造 API 请求体 (Payload)
+                payload = {
+                    'organism': gprofiler_organism_code,
+                    'query': converted_ids,
+                    'sources': enrich_sources,
+                    'user_threshold': p_threshold,
+                    'no_iea': exclude_iea,
+                    'significance_threshold_method': correction_method,
+                    'numeric_ns': 'ENTREZGENE_ACC' # <--- 强制指定命名空间！Python库不让传，我们直接传给服务器
+                }
+                
+                # 直接 POST 请求
+                response = requests.post(
+                    'https://biit.cs.ut.ee/gprofiler/api/gost/profile/', 
+                    json=payload
                 )
-            
-            # --- 步骤 3: 结果处理 ---
-            if not isinstance(raw_results, dict) or 'result' not in raw_results or not raw_results['result']:
-                st.warning(f"❌ 分析完成，但在当前参数下未发现显著通路。")
-                st.markdown(f"""
-                **排查总结：**
-                * ID 转换 ({len(converted_ids)} 个) 已成功。
-                * API 调用已修复。
-                * 请确认您是否将矫正算法设置为 **`fdr`** (FDR) 并将 P-value 阈值设置为 **`0.05`** 或更高 (例如 0.1)。
-                """)
-            else:
-                results = pd.DataFrame(raw_results['result'])
                 
-                # 数据清洗
-                results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
-                results['short_name'] = results['name'].apply(lambda x: x[:50] + '...' if len(x)>50 else x)
-                if 'intersections' in results.columns:
-                    results['intersections'] = results['intersections'].apply(lambda x: "; ".join(x) if isinstance(x, list) else str(x))
-                
-                results = results.sort_values('p_value', ascending=True)
-                
-                st.success(f"✅ 成功发现 {len(results)} 条通路。")
-                
-                # --- 可视化 (保持不变) ---
-                st.divider()
-                viz_col1, viz_col2 = st.columns([1, 3])
-                
-                with viz_col1:
-                    with st.container(border=True):
-                        st.markdown("### 🎨 绘图控制")
-                        plot_type = st.selectbox("图表类型:", ["气泡图 (Dot Plot)", "柱状图 (Bar Chart)"])
-                        top_n = st.slider("展示数量:", 5, 50, 20)
-                        color_scale = st.selectbox("配色:", ["Tealgrn", "Viridis", "Plasma", "Bluered"])
-                
-                plot_data = results.head(top_n).copy().sort_values('p_value', ascending=False)
-                
-                with viz_col2:
-                    if plot_type == "气泡图 (Dot Plot)":
-                        fig = px.scatter(
-                            plot_data, x="intersection_size", y="short_name", size="intersection_size", 
-                            color="neg_log10_p", hover_data=["p_value", "source"], color_continuous_scale=color_scale,
-                            labels={"intersection_size": "Count", "short_name": "Pathway", "neg_log10_p": "-log10(P)"},
-                            title=f"Top {top_n} Enriched Pathways"
-                        )
-                    else:
-                        fig = px.bar(
-                            plot_data, x="neg_log10_p", y="short_name", color="intersection_size", orientation='h',
-                            color_continuous_scale=color_scale,
-                            labels={"neg_log10_p": "-log10(P)", "short_name": "Pathway", "intersection_size": "Count"},
-                            title=f"Top {top_n} Enriched Pathways"
-                        )
+                # 解析结果
+                if response.status_code != 200:
+                    st.error(f"服务器连接失败 (Status {response.status_code}): {response.text}")
+                    st.stop()
                     
-                    fig.update_layout(height=600, plot_bgcolor='white')
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    col_e1, col_e2 = st.columns(2)
-                    output_excel = io.BytesIO()
-                    with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
-                        results.drop(columns=['neg_log10_p', 'short_name']).to_excel(writer, index=False)
-                    col_e1.download_button("📥 下载 Excel", output_excel.getvalue(), "enrichment.xlsx")
-                    
-                    buf = io.StringIO()
-                    fig.write_html(buf)
-                    col_e2.download_button("📥 下载 HTML", buf.getvalue().encode(), "plot.html")
+                raw_results = response.json()
+                
+            except Exception as e:
+                st.error(f"API 通讯错误: {e}")
+                st.stop()
 
-        except Exception as e:
-            st.error(f"运行出错: {e}")
+        # --- 步骤 3: 结果处理 ---
+        # 直接解析 JSON 中的 result
+        if 'result' not in raw_results or not raw_results['result']:
+            st.warning(f"⚠️ 分析完成，未发现显著通路。")
+            st.markdown(f"**调试建议：** 即使使用了强制 ID 模式，依然没有结果。这说明这组基因在选定数据库中确实没有统计学富集。")
+        else:
+            # 成功！
+            results = pd.DataFrame(raw_results['result'])
+            
+            # 数据清洗
+            results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
+            results['short_name'] = results['name'].apply(lambda x: x[:50] + '...' if len(x)>50 else x)
+            # 处理 intersections
+            if 'intersections' in results.columns:
+                results['intersections'] = results['intersections'].apply(lambda x: "; ".join(x) if isinstance(x, list) else str(x))
+            
+            # 仅保留关键列并改名
+            display_df = results[[
+                'source', 'native', 'name', 'p_value', 'intersection_size', 'term_size', 'intersections', 'neg_log10_p', 'short_name'
+            ]].sort_values('p_value')
+            
+            st.success(f"✅ 成功发现 {len(display_df)} 条通路！(API 响应成功)")
+            
+            # --- 可视化 ---
+            st.divider()
+            viz_col1, viz_col2 = st.columns([1, 3])
+            
+            with viz_col1:
+                with st.container(border=True):
+                    st.markdown("### 🎨 绘图控制")
+                    plot_type = st.selectbox("图表类型:", ["气泡图 (Dot Plot)", "柱状图 (Bar Chart)"])
+                    top_n = st.slider("展示数量:", 5, 50, 20)
+                    color_scale = st.selectbox("配色:", ["Tealgrn", "Viridis", "Plasma", "Bluered"])
+            
+            plot_data = display_df.head(top_n).copy().sort_values('p_value', ascending=False)
+            
+            with viz_col2:
+                if plot_type == "气泡图 (Dot Plot)":
+                    fig = px.scatter(
+                        plot_data, x="intersection_size", y="short_name", size="intersection_size", 
+                        color="neg_log10_p", hover_data=["p_value", "source"], color_continuous_scale=color_scale,
+                        labels={"intersection_size": "Count", "short_name": "Pathway", "neg_log10_p": "-log10(P)"},
+                        title=f"Top {top_n} Enriched Pathways"
+                    )
+                else:
+                    fig = px.bar(
+                        plot_data, x="neg_log10_p", y="short_name", color="intersection_size", orientation='h',
+                        color_continuous_scale=color_scale,
+                        labels={"neg_log10_p": "-log10(P)", "short_name": "Pathway", "intersection_size": "Count"},
+                        title=f"Top {top_n} Enriched Pathways"
+                    )
+                
+                fig.update_layout(height=600, plot_bgcolor='white')
+                st.plotly_chart(fig, use_container_width=True)
+                
+                col_e1, col_e2 = st.columns(2)
+                output_excel = io.BytesIO()
+                with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
+                    display_df.drop(columns=['neg_log10_p', 'short_name']).to_excel(writer, index=False)
+                col_e1.download_button("📥 下载 Excel", output_excel.getvalue(), "enrichment.xlsx")
+                
+                buf = io.StringIO()
+                fig.write_html(buf)
+                col_e2.download_button("📥 下载 HTML", buf.getvalue().encode(), "plot.html")
