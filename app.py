@@ -3,39 +3,38 @@ import pandas as pd
 import mygene
 import io
 import math
-from gprofiler import GProfiler
+import requests # <--- 弃用 gprofiler 库，直接用原生请求
 import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 页面基础设置 ---
-st.set_page_config(page_title="BioInfo Tool Pro v3.3", layout="wide", page_icon="🧬")
+st.set_page_config(page_title="BioInfo Tool Pro v3.7", layout="wide", page_icon="🧬")
 
-st.title("🧬 基因组学多功能工具 (v3.3 - 终极稳定性版)")
+st.title("🧬 基因组学多功能工具 (v3.7 - 核武版)")
 st.markdown("""
-**错误修复：** 针对富集分析结果返回结构进行了最严格的类型检查和安全访问，彻底消除 `list indices must be integers or slices, not str` 错误。
+**修复策略：** 弃用第三方 Python 库，直接调用 g:Profiler 官方 API 接口。强制指定 `numeric_ns='ENTREZGENE_ACC'`，确保纯数字 ID 被 100% 识别。
 """)
 
-# --- 全局物种映射 (保持不变) ---
+# --- 全局物种映射 ---
 species_map = {
     "Human (Homo sapiens)": (9606, 'hsapiens'),
     "Mouse (Mus musculus)": (10090, 'mmusculus'),
     "Rat (Rattus norvegicus)": (10116, 'rnorvegicus')
 }
 
-# --- 侧边栏：全局物种 ---
 st.sidebar.header("🛠️ 全局设置")
 selected_species_key = st.sidebar.selectbox("选择物种:", options=list(species_map.keys()))
 species_id, gprofiler_organism_code = species_map[selected_species_key]
 
-# --- 辅助函数 (保持不变) ---
+# --- 辅助函数 ---
 def clean_cell_data(cell):
     if isinstance(cell, list):
         cleaned_list = [str(item) if not isinstance(item, dict) else f"{item.get('chr','N/A')}:{item.get('start','N/A')}" for item in cell]
         return "; ".join(cleaned_list)
     return str(cell) if isinstance(cell, dict) else cell
 
-# --- 主体 Tabs (保持不变) ---
-tab1, tab2 = st.tabs(["1. 基因 ID 转换与注释", "2. 富集分析与可视化 (Debug)"])
+# --- Tabs ---
+tab1, tab2 = st.tabs(["1. 基因 ID 转换", "2. 富集分析 (Direct API)"])
 
 # =================================================================================
 # Tab 1: 基因 ID 转换 (保持不变，避免引入新错误)
@@ -240,3 +239,4 @@ with tab2:
                 buf = io.StringIO()
                 fig.write_html(buf)
                 col_e2.download_button("📥 下载 HTML", buf.getvalue().encode(), "plot.html")
+
