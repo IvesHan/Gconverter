@@ -5,3 +5,5 @@ openpyxl
 xlsxwriter
 gprofiler-official
 plotly
+requests
+kaleido
