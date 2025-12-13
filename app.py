@@ -92,83 +92,93 @@ with tab1:
 
 
 # =================================================================================
-# Tab 2: 富集分析 (强力桥接逻辑)
+# Tab 2: 富集分析 (Entrez 策略)
 # =================================================================================
 with tab2:
     st.header("功能二：富集分析 & 可视化")
-    st.markdown("✅ **修复策略：** 系统会自动先将您的基因名为 **Ensembl ID**，这是 g:Profiler 最喜欢的格式。")
+    st.markdown("✅ **当前策略：** 强制将输入转换为 **Entrez ID** (例如: `12345`) 发送给分析器。")
     
     col_in1, col_in2 = st.columns([1, 2])
     with col_in1:
-        raw_text_enrich = st.text_area("粘贴基因列表:", height=200, placeholder="TP53\nEGFR\n7157...", key="t2_text")
+        raw_text_enrich = st.text_area("粘贴基因列表:", height=200, placeholder="TP53\nEGFR...", key="t2_text")
         
     with col_in2:
         with st.container(border=True):
             st.subheader("⚙️ 参数设置")
-            enrich_sources = st.multiselect("数据库:", ['KEGG', 'GO:BP', 'GO:CC', 'GO:MF', 'Reactome', 'WP'], default=['KEGG', 'GO:BP'])
+            # 默认只选 KEGG 和 GO:BP 减少干扰
+            enrich_sources = st.multiselect("数据库:", ['KEGG', 'GO:BP', 'GO:CC', 'GO:MF', 'Reactome'], default=['KEGG', 'GO:BP'])
             
             col_p1, col_p2 = st.columns(2)
             with col_p1:
+                # 建议稍微放宽一点，观察是否有数据
                 p_threshold = st.slider("P-value 阈值:", 0.01, 1.0, 0.05)
             with col_p2:
                 correction_method = st.selectbox("矫正算法:", ["fdr", "bonferroni", "g_SCS"], index=0)
             
             exclude_iea = st.checkbox("排除电子注释 (建议不勾选)", value=False)
             
-            run_enrich = st.button("📈 运行强力分析", type="primary")
+            run_enrich = st.button("📈 运行分析 (Entrez 模式)", type="primary")
 
     if run_enrich and raw_text_enrich:
         raw_gene_list = [x.strip() for x in raw_text_enrich.split('\n') if x.strip()]
         
         try:
-            # --- 步骤 1: 强制翻译 (The Bridge) ---
-            with st.spinner("第一步: 正在标准化基因 ID (MyGene -> Ensembl)..."):
+            # --- 步骤 1: 转换为 Entrez ID ---
+            with st.spinner("第一步: 正在获取 Entrez ID (MyGene -> Entrez)..."):
                 mg = mygene.MyGeneInfo()
-                # 查询 Ensembl ID
-                map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='ensembl.gene', species=species_id)
+                # 重点：查询 entrezgene
+                map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene', species=species_id)
                 
                 converted_ids = []
-                success_count = 0
+                debug_log = []
                 
                 for item in map_res:
-                    # 尝试提取 Ensembl ID
-                    if 'ensembl' in item:
-                        ens_data = item['ensembl']
-                        if isinstance(ens_data, list):
-                            # 如果有多个，取第一个
-                            converted_ids.append(ens_data[0]['gene'])
-                        elif isinstance(ens_data, dict):
-                            converted_ids.append(ens_data['gene'])
-                        success_count += 1
+                    query_name = item.get('query', 'N/A')
+                    # 优先取 Entrez ID
+                    if 'entrezgene' in item:
+                        eid = str(item['entrezgene']) # 必须转字符串
+                        converted_ids.append(eid)
+                        debug_log.append(f"{query_name} -> {eid}")
                     else:
-                        # 如果没找到 Ensembl，还是把原名放进去，死马当活马医
-                        converted_ids.append(item['query'])
-                
+                        # 如果没有 Entrez，记录失败
+                        debug_log.append(f"{query_name} -> 未找到 Entrez ID")
+
                 # 去重
                 converted_ids = list(set(converted_ids))
             
-            # 显示翻译结果供调试
-            with st.expander(f"🔍 ID 预处理报告 (成功转换: {success_count}/{len(raw_gene_list)})", expanded=False):
-                st.write(f"发送给 g:Profiler 的 ID 列表 (前 20 个): {converted_ids[:20]}")
-                if success_count == 0:
-                    st.error("⚠️ 警告：没有成功转换为 Ensembl ID。请检查您选择的【物种】是否与基因列表匹配！(例如：选了人类，但输入了小鼠基因名)")
+            # 调试面板
+            with st.expander(f"🔍 ID 转换日志 (获取到 {len(converted_ids)} 个唯一 Entrez ID)", expanded=True):
+                st.text("发送给 g:Profiler 的前 10 个 ID: " + str(converted_ids[:10]))
+                if len(converted_ids) < 5:
+                    st.warning("⚠️ 获取到的 Entrez ID 非常少，这可能是导致无结果的原因。请检查物种是否对应。")
+
+            if not converted_ids:
+                st.error("❌ 无法将任何基因转换为 Entrez ID。请检查输入格式。")
+                st.stop()
 
             # --- 步骤 2: 发送给 g:Profiler ---
-            with st.spinner("第二步: 正在进行富集分析 (g:Profiler)..."):
-                gp = GProfiler(user_agent='streamlit_app_v3.4')
+            with st.spinner(f"第二步: 正在对 {len(converted_ids)} 个 Entrez ID 进行富集分析..."):
+                gp = GProfiler(user_agent='streamlit_app_v3.5')
                 
                 raw_results = gp.profile(
                     organism=gprofiler_organism_code, 
-                    query=converted_ids,  # <--- 注意这里用的是转换后的 ID
+                    query=converted_ids,  # 发送纯数字 ID
                     sources=enrich_sources, 
                     user_threshold=p_threshold, 
                     no_iea=exclude_iea,
-                    significance_threshold_method=correction_method
+                    significance_threshold_method=correction_method,
+                    numeric_ns='ENTREZGENE_ACC' # 显式告诉 g:Profiler 这些数字是 Entrez ID
                 )
             
             # --- 步骤 3: 结果处理 ---
             if not isinstance(raw_results, dict) or 'result' not in raw_results or not raw_results['result']:
-                st.error(f"❌ 依然没有结果。可能原因：\n1. 您选择的【物种】({selected_species_key}) 与输入的基因不匹配。\n2. 这些基因本身就没有在选定的数据库 ({enrich_sources}) 中富集到任何通路。")
+                st.error(f"❌ 依然没有结果。")
+                st.markdown("""
+                **最后的排查建议：**
+                1. 您的基因列表虽然转换成功，但在选定的数据库 (KEGG/GO) 中可能真的**没有显著富集**。
+                2. 尝试将 **P-value 阈值拉到 1.0**，看看是否哪怕有一个不显著的通路返回。
+                3. 确保网络能连接到 g:Profiler 服务器。
+                """)
             else:
                 results = pd.DataFrame(raw_results['result'])
                 
@@ -180,7 +190,7 @@ with tab2:
                 
                 results = results.sort_values('p_value', ascending=True)
                 
-                st.success(f"✅ 成功发现 {len(results)} 条显著通路！")
+                st.success(f"✅ 终于成功了！发现 {len(results)} 条通路。")
                 
                 # --- 可视化 ---
                 st.divider()
@@ -214,7 +224,6 @@ with tab2:
                     fig.update_layout(height=600, plot_bgcolor='white')
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # 导出
                     col_e1, col_e2 = st.columns(2)
                     output_excel = io.BytesIO()
                     with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
@@ -223,7 +232,7 @@ with tab2:
                     
                     buf = io.StringIO()
                     fig.write_html(buf)
-                    col_e2.download_button("📥 下载 HTML 图表", buf.getvalue().encode(), "plot.html")
+                    col_e2.download_button("📥 下载 HTML", buf.getvalue().encode(), "plot.html")
 
         except Exception as e:
             st.error(f"运行出错: {e}")
