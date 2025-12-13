@@ -91,11 +91,11 @@ with tab1:
 
 
 # =================================================================================
-# Tab 2: 富集分析 (Direct API 核心)
+# Tab 2: 富集分析 (修复 TypeError)
 # =================================================================================
 with tab2:
     st.header("功能二：富集分析 & 可视化")
-    st.markdown("✅ **技术说明：** 使用 `requests.post` 直接向 `biit.cs.ut.ee` 发送 JSON 数据，绕过 Python 库的 Bug。")
+    st.markdown("✅ **技术说明：** Direct API 模式 + 数据类型强制转换。")
     
     col_in1, col_in2 = st.columns([1, 2])
     with col_in1:
@@ -110,13 +110,12 @@ with tab2:
             with col_p1:
                 p_threshold = st.slider("P-value 阈值:", 0.01, 1.0, 0.05)
             with col_p2:
-                # 这里的 key 需要对应 API 的 value
                 correction_map = {"fdr": "fdr", "bonferroni": "bonferroni", "g_SCS": "g_SCS"}
                 correction_method = st.selectbox("矫正算法:", list(correction_map.keys()), index=0)
             
             exclude_iea = st.checkbox("排除电子注释 (建议不勾选)", value=False)
             
-            run_enrich = st.button("📈 运行分析 (Direct API)", type="primary")
+            run_enrich = st.button("📈 运行分析", type="primary")
 
     if run_enrich and raw_text_enrich:
         raw_gene_list = [x.strip() for x in raw_text_enrich.split('\n') if x.strip()]
@@ -144,10 +143,9 @@ with tab2:
                 st.error("❌ 无法获取 Entrez ID，请检查物种或输入。")
                 st.stop()
 
-        # --- 步骤 2: 原生 API 调用 (The Nuclear Option) ---
+        # --- 步骤 2: 原生 API 调用 ---
         with st.spinner("第二步: 调用 g:Profiler 官方 API..."):
             try:
-                # 构造 API 请求体 (Payload)
                 payload = {
                     'organism': gprofiler_organism_code,
                     'query': converted_ids,
@@ -155,16 +153,14 @@ with tab2:
                     'user_threshold': p_threshold,
                     'no_iea': exclude_iea,
                     'significance_threshold_method': correction_method,
-                    'numeric_ns': 'ENTREZGENE_ACC' # <--- 强制指定命名空间！Python库不让传，我们直接传给服务器
+                    'numeric_ns': 'ENTREZGENE_ACC'
                 }
                 
-                # 直接 POST 请求
                 response = requests.post(
                     'https://biit.cs.ut.ee/gprofiler/api/gost/profile/', 
                     json=payload
                 )
                 
-                # 解析结果
                 if response.status_code != 200:
                     st.error(f"服务器连接失败 (Status {response.status_code}): {response.text}")
                     st.stop()
@@ -175,28 +171,32 @@ with tab2:
                 st.error(f"API 通讯错误: {e}")
                 st.stop()
 
-        # --- 步骤 3: 结果处理 ---
-        # 直接解析 JSON 中的 result
+        # --- 步骤 3: 结果处理 (关键修复点) ---
         if 'result' not in raw_results or not raw_results['result']:
             st.warning(f"⚠️ 分析完成，未发现显著通路。")
-            st.markdown(f"**调试建议：** 即使使用了强制 ID 模式，依然没有结果。这说明这组基因在选定数据库中确实没有统计学富集。")
         else:
             # 成功！
             results = pd.DataFrame(raw_results['result'])
             
-            # 数据清洗
+            # 1. 计算 -log10 P值
             results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
-            results['short_name'] = results['name'].apply(lambda x: x[:50] + '...' if len(x)>50 else x)
-            # 处理 intersections
-            if 'intersections' in results.columns:
-                results['intersections'] = results['intersections'].apply(lambda x: "; ".join(x) if isinstance(x, list) else str(x))
             
-            # 仅保留关键列并改名
+            # 2. 截断过长名称
+            results['short_name'] = results['name'].apply(lambda x: x[:50] + '...' if len(x)>50 else x)
+            
+            # 3. 修复 intersections 列 (TypeError 修复点)
+            if 'intersections' in results.columns:
+                # 这里的 map(str, x) 是核心修复：把数字列表转为字符串列表
+                results['intersections'] = results['intersections'].apply(
+                    lambda x: "; ".join(map(str, x)) if isinstance(x, list) else str(x)
+                )
+            
+            # 4. 排序与筛选列
             display_df = results[[
                 'source', 'native', 'name', 'p_value', 'intersection_size', 'term_size', 'intersections', 'neg_log10_p', 'short_name'
             ]].sort_values('p_value')
             
-            st.success(f"✅ 成功发现 {len(display_df)} 条通路！(API 响应成功)")
+            st.success(f"✅ 成功发现 {len(display_df)} 条通路！(分析完成)")
             
             # --- 可视化 ---
             st.divider()
@@ -239,4 +239,3 @@ with tab2:
                 buf = io.StringIO()
                 fig.write_html(buf)
                 col_e2.download_button("📥 下载 HTML", buf.getvalue().encode(), "plot.html")
-
