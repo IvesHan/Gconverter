@@ -8,8 +8,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.1 - Layout Control)")
+st.set_page_config(page_title="Ives_Omics Analysis Tool", layout="wide", page_icon="🔬")
+st.title("🔬 Ives_OmicsOmics Data Assistant (v5.1 - Layout Control)")
 
 # --- 2. 全局物种映射 ---
 species_map = {
@@ -323,3 +323,4 @@ with tab2:
             )
         except Exception as e:
             e3.error(f"PDF Error: {e}")
+
