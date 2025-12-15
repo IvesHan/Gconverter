@@ -8,19 +8,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="Ives_Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Ives_OmicsOmics Data Assistant (v5.1 - Layout Control)")
+st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
+st.title("🔬 Omics Data Assistant (v5.2 - KEGG Validator)")
 
-# --- 2. 全局物种映射 ---
+# --- 2. 全局物种映射 (增加 KEGG 前缀) ---
 species_map = {
-    "Human (Homo sapiens)": (9606, 'hsapiens'),
-    "Mouse (Mus musculus)": (10090, 'mmusculus'),
-    "Rat (Rattus norvegicus)": (10116, 'rnorvegicus')
+    "Human (Homo sapiens)": (9606, 'hsapiens', 'hsa'),
+    "Mouse (Mus musculus)": (10090, 'mmusculus', 'mmu'),
+    "Rat (Rattus norvegicus)": (10116, 'rnorvegicus', 'rno')
 }
 
 st.sidebar.header("Settings")
 selected_species_key = st.sidebar.selectbox("Species:", options=list(species_map.keys()))
-species_id, gprofiler_organism_code = species_map[selected_species_key]
+species_id, gprofiler_organism_code, kegg_prefix = species_map[selected_species_key]
 
 # --- 3. 辅助函数 ---
 def clean_cell_data(cell):
@@ -40,7 +40,6 @@ def simplify_results(df, threshold=0.7):
     df = df.sort_values('p_value', ascending=True)
     keep_indices = []
     genes_list = df['intersections_raw'].tolist()
-    
     for i in range(len(df)):
         current_genes = genes_list[i]
         is_redundant = False
@@ -96,10 +95,8 @@ with tab1:
                     res = mg.querymany(gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields=fields, species=species_id, as_dataframe=True)
                     df_res = res.reset_index()
                     for col in df_res.columns: df_res[col] = df_res[col].apply(clean_cell_data)
-                    
                     if input_method == "Paste Text": final_df = df_res
                     else: final_df = pd.merge(df_input, df_res, left_on=col_name, right_on='query', how='left')
-                    
                     st.dataframe(final_df)
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='xlsxwriter') as writer: final_df.to_excel(writer, index=False)
@@ -108,7 +105,7 @@ with tab1:
                     st.error(f"Error: {e}")
 
 # =================================================================================
-# Tab 2: 富集分析
+# Tab 2: 富集分析 (新增 KEGG 链接生成器)
 # =================================================================================
 with tab2:
     st.header("Enrichment Analysis")
@@ -133,6 +130,7 @@ with tab2:
 
         with st.spinner("Talking to g:Profiler..."):
             try:
+                # 1. ID Mapping
                 mg = mygene.MyGeneInfo()
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene,symbol', species=species_id)
                 converted_ids = []
@@ -148,6 +146,7 @@ with tab2:
                 if not unique_converted_ids:
                     st.error("No valid IDs identified.")
                 else:
+                    # 2. API Call
                     payload = {
                         'organism': gprofiler_organism_code,
                         'query': unique_converted_ids,
@@ -164,25 +163,50 @@ with tab2:
                         results = pd.DataFrame(raw_results['result'])
                         results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
                         
+                        # --- 核心：数据解析与链接生成 ---
+                        
+                        # 1. 解析基因 Symbol
                         def decode_intersections(inter_list):
                             if not isinstance(inter_list, list): return ""
                             hit_genes = []
                             for idx, evidences in enumerate(inter_list):
-                                if evidences: 
-                                    if idx < len(unique_converted_ids):
-                                        hit_genes.append(entrez_to_symbol.get(unique_converted_ids[idx], unique_converted_ids[idx]))
+                                if evidences and idx < len(unique_converted_ids):
+                                    hit_genes.append(entrez_to_symbol.get(unique_converted_ids[idx], unique_converted_ids[idx]))
                             return "; ".join(hit_genes)
 
-                        def get_gene_ids_list(inter_list):
+                        # 2. 提取 Entrez ID 列表 (用于生成 KEGG 链接)
+                        def get_entrez_ids_list(inter_list):
                             ids = []
                             for idx, evidences in enumerate(inter_list):
                                 if evidences and idx < len(unique_converted_ids):
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
+                        # 3. 生成 KEGG 官方验证链接
+                        def generate_kegg_link(row):
+                            # 只对 KEGG 通路生成链接
+                            if "KEGG" not in row['source']: return None
+                            
+                            # 原生 ID 格式通常是 KEGG:04110，我们要转成 hsa04110
+                            pathway_code = row['native'].replace("KEGG:", "")
+                            full_map_id = f"{kegg_prefix}{pathway_code}"
+                            
+                            # 获取这一行命中的所有 Entrez ID
+                            hit_ids = row['intersections_raw']
+                            if not hit_ids: return None
+                            
+                            # 构造 URL: https://www.kegg.jp/pathway/hsa04110+123+456+789
+                            # + 号连接 ID 会让 KEGG 高亮这些基因
+                            joined_ids = "+".join(hit_ids)
+                            url = f"https://www.kegg.jp/pathway/{full_map_id}+{joined_ids}"
+                            return url
+
                         if 'intersections' in results.columns:
                             results['hit_genes'] = results['intersections'].apply(decode_intersections)
-                            results['intersections_raw'] = results['intersections'].apply(get_gene_ids_list)
+                            results['intersections_raw'] = results['intersections'].apply(get_entrez_ids_list)
+                            # 生成链接列
+                            results['KEGG_Link'] = results.apply(generate_kegg_link, axis=1)
+                            # 替换显示列
                             results['intersections'] = results['hit_genes']
 
                         st.session_state['raw_results'] = results.sort_values('p_value')
@@ -193,11 +217,12 @@ with tab2:
             except Exception as e:
                 st.error(f"Error: {e}")
 
+    # 过滤与显示
     if 'raw_results' in st.session_state:
         df_raw = st.session_state['raw_results']
         
         st.divider()
-        st.subheader("Step 2: Filter & Select")
+        st.subheader("Step 2: Filter & Validate")
         
         col_f1, col_f2 = st.columns([1, 2])
         with col_f1:
@@ -212,20 +237,28 @@ with tab2:
             df_processed = df_raw.copy()
 
         with col_f2:
-            st.markdown("##### 2. Manual Selection")
+            st.markdown("##### 2. Manual Selection & Validator")
+            st.info("💡 **New Feature:** Click the **KEGG_Link** to see your genes highlighted in RED on the official KEGG map.")
         
-        df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'hit_genes']].copy()
+        # 准备显示用的表格，把 Link 放在显眼位置
+        df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'KEGG_Link']].copy()
         df_display.insert(0, "Select", False)
         
         edited_df = st.data_editor(
             df_display,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Plot?", default=False),
-                "p_value": st.column_config.NumberColumn(format="%.2e")
+                "p_value": st.column_config.NumberColumn(format="%.2e"),
+                "KEGG_Link": st.column_config.LinkColumn(
+                    "KEGG Validator", 
+                    help="Click to open KEGG website with genes highlighted",
+                    validate="^https://www.kegg.jp/.*", # 简单的验证正则
+                    display_text="Open Map"
+                )
             },
-            disabled=["source", "name", "p_value", "intersection_size", "hit_genes"],
+            disabled=["source", "name", "p_value", "intersection_size", "KEGG_Link"],
             hide_index=True,
-            height=300
+            height=400
         )
         
         selected_indices = edited_df[edited_df["Select"]].index
@@ -256,18 +289,14 @@ with tab2:
 
                 color_scale = st.selectbox("Color Theme:", ["Tealgrn", "Viridis", "Plasma", "Bluered", "Sunset"])
 
-                # --- 新增：排版控制 ---
                 st.divider()
-                st.markdown("**2. Layout Adjustments (Fix PDF Cutoff)**")
-                margin_left = st.slider("Left Margin (px):", 100, 800, 300, help="Increase this if pathway names are cut off in the PDF.")
-                plot_width = st.slider("Total Width (px):", 600, 2000, 1000, help="Increase width to prevent chart squishing.")
+                st.markdown("**2. Layout Adjustments**")
+                margin_left = st.slider("Left Margin (px):", 100, 800, 300)
+                plot_width = st.slider("Total Width (px):", 600, 2000, 1000)
                 plot_height = st.slider("Total Height (px):", 400, 1500, max(600, len(plot_data)*25))
 
         with viz_c2:
-            # 在绘图前，如果名字实在太长，我们可以稍微截断一下，或者完全保留由用户通过 Margin 控制
-            # 这里选择保留完整名字，因为现在有了 Margin 控制
-            # plot_data['short_name'] = plot_data['name'].apply(lambda x: x[:50] + '...' if len(x)>50 else x)
-            plot_data['short_name'] = plot_data['name'] # 尽可能保留全名
+            plot_data['short_name'] = plot_data['name']
             
             if plot_type == "Dot Plot":
                 fig = px.scatter(
@@ -285,16 +314,15 @@ with tab2:
                     title=plot_title
                 )
             
-            # --- 关键修改：应用用户自定义的 Margin 和 Width ---
             fig.update_layout(
                 width=plot_width,
                 height=plot_height,
-                margin=dict(l=margin_left, r=20, t=50, b=50), # l=Left Margin
+                margin=dict(l=margin_left, r=20, t=50, b=50),
                 plot_bgcolor='white', 
                 font=dict(family="Arial", size=12)
             )
             
-            st.plotly_chart(fig, use_container_width=True) # 网页上自适应，但导出时会用上面的 width/height
+            st.plotly_chart(fig, use_container_width=True)
 
         st.markdown("### Export")
         e1, e2, e3 = st.columns(3)
@@ -309,18 +337,9 @@ with tab2:
         fig.write_html(buf_html)
         e2.download_button("📥 Plot (HTML)", buf_html.getvalue().encode(), "plot.html")
 
-        # PDF Export with explicit error handling
         try:
             with st.spinner("Generating PDF..."):
-                # 使用用户定义的 width/height 导出
                 pdf_bytes = fig.to_image(format="pdf", engine="kaleido", scale=2, width=plot_width, height=plot_height)
-                
-            e3.download_button(
-                label="📥 Plot (PDF)",
-                data=pdf_bytes,
-                file_name="enrichment_plot.pdf",
-                mime="application/pdf"
-            )
+            e3.download_button("📥 Plot (PDF)", pdf_bytes, "enrichment_plot.pdf", "application/pdf")
         except Exception as e:
             e3.error(f"PDF Error: {e}")
-
