@@ -8,10 +8,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="Omics Analysis Tool——by Ives", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.2 - KEGG Validator)")
+st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
+st.title("🔬 Omics Data Assistant (v5.3 - Link Fix)")
 
-# --- 2. 全局物种映射 (增加 KEGG 前缀) ---
+# --- 2. 全局物种映射 ---
 species_map = {
     "Human (Homo sapiens)": (9606, 'hsapiens', 'hsa'),
     "Mouse (Mus musculus)": (10090, 'mmusculus', 'mmu'),
@@ -105,7 +105,7 @@ with tab1:
                     st.error(f"Error: {e}")
 
 # =================================================================================
-# Tab 2: 富集分析 (新增 KEGG 链接生成器)
+# Tab 2: 富集分析 (修复链接格式)
 # =================================================================================
 with tab2:
     st.header("Enrichment Analysis")
@@ -130,7 +130,6 @@ with tab2:
 
         with st.spinner("Talking to g:Profiler..."):
             try:
-                # 1. ID Mapping
                 mg = mygene.MyGeneInfo()
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene,symbol', species=species_id)
                 converted_ids = []
@@ -146,7 +145,6 @@ with tab2:
                 if not unique_converted_ids:
                     st.error("No valid IDs identified.")
                 else:
-                    # 2. API Call
                     payload = {
                         'organism': gprofiler_organism_code,
                         'query': unique_converted_ids,
@@ -163,9 +161,6 @@ with tab2:
                         results = pd.DataFrame(raw_results['result'])
                         results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
                         
-                        # --- 核心：数据解析与链接生成 ---
-                        
-                        # 1. 解析基因 Symbol
                         def decode_intersections(inter_list):
                             if not isinstance(inter_list, list): return ""
                             hit_genes = []
@@ -174,7 +169,6 @@ with tab2:
                                     hit_genes.append(entrez_to_symbol.get(unique_converted_ids[idx], unique_converted_ids[idx]))
                             return "; ".join(hit_genes)
 
-                        # 2. 提取 Entrez ID 列表 (用于生成 KEGG 链接)
                         def get_entrez_ids_list(inter_list):
                             ids = []
                             for idx, evidences in enumerate(inter_list):
@@ -182,31 +176,22 @@ with tab2:
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
-                        # 3. 生成 KEGG 官方验证链接
                         def generate_kegg_link(row):
-                            # 只对 KEGG 通路生成链接
                             if "KEGG" not in row['source']: return None
-                            
-                            # 原生 ID 格式通常是 KEGG:04110，我们要转成 hsa04110
                             pathway_code = row['native'].replace("KEGG:", "")
                             full_map_id = f"{kegg_prefix}{pathway_code}"
-                            
-                            # 获取这一行命中的所有 Entrez ID
                             hit_ids = row['intersections_raw']
                             if not hit_ids: return None
-                            
-                            # 构造 URL: https://www.kegg.jp/pathway/hsa04110+123+456+789
-                            # + 号连接 ID 会让 KEGG 高亮这些基因
                             joined_ids = "+".join(hit_ids)
-                            url = f"https://www.kegg.jp/pathway/{full_map_id}+{joined_ids}"
+                            
+                            # --- 关键修复：改用 show_pathway 接口 ---
+                            url = f"https://www.kegg.jp/kegg-bin/show_pathway?{full_map_id}+{joined_ids}"
                             return url
 
                         if 'intersections' in results.columns:
                             results['hit_genes'] = results['intersections'].apply(decode_intersections)
                             results['intersections_raw'] = results['intersections'].apply(get_entrez_ids_list)
-                            # 生成链接列
                             results['KEGG_Link'] = results.apply(generate_kegg_link, axis=1)
-                            # 替换显示列
                             results['intersections'] = results['hit_genes']
 
                         st.session_state['raw_results'] = results.sort_values('p_value')
@@ -217,7 +202,6 @@ with tab2:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # 过滤与显示
     if 'raw_results' in st.session_state:
         df_raw = st.session_state['raw_results']
         
@@ -238,9 +222,8 @@ with tab2:
 
         with col_f2:
             st.markdown("##### 2. Manual Selection & Validator")
-            st.info("💡 **New Feature:** Click the **KEGG_Link** to see your genes highlighted in RED on the official KEGG map.")
+            st.info("💡 **Tip:** Click **Open Map** to see red-highlighted genes on the official KEGG website.")
         
-        # 准备显示用的表格，把 Link 放在显眼位置
         df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'KEGG_Link']].copy()
         df_display.insert(0, "Select", False)
         
@@ -252,7 +235,7 @@ with tab2:
                 "KEGG_Link": st.column_config.LinkColumn(
                     "KEGG Validator", 
                     help="Click to open KEGG website with genes highlighted",
-                    validate="^https://www.kegg.jp/.*", # 简单的验证正则
+                    validate="^https://www.kegg.jp/.*", 
                     display_text="Open Map"
                 )
             },
@@ -343,4 +326,3 @@ with tab2:
             e3.download_button("📥 Plot (PDF)", pdf_bytes, "enrichment_plot.pdf", "application/pdf")
         except Exception as e:
             e3.error(f"PDF Error: {e}")
-
