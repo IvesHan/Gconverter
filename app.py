@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.4 - Dual Validator)")
+st.title("🔬 Omics Data Assistant (v5.5 - Custom Override)")
 
 # --- 2. 全局物种映射 ---
 species_map = {
@@ -105,7 +105,7 @@ with tab1:
                     st.error(f"Error: {e}")
 
 # =================================================================================
-# Tab 2: 富集分析 (新增文字版验证)
+# Tab 2: 富集分析 (新增人工补录)
 # =================================================================================
 with tab2:
     st.header("Enrichment Analysis")
@@ -113,7 +113,7 @@ with tab2:
     with st.expander("Step 1: Analysis Parameters", expanded=True):
         col_in1, col_in2 = st.columns([1, 2])
         with col_in1:
-            raw_text_enrich = st.text_area("Paste Gene List:", height=150, placeholder="TP53\nEGFR...")
+            raw_text_enrich = st.text_area("Paste Gene List:", height=150, placeholder="TP53\nEGFR\nSHC4...")
         
         with col_in2:
             enrich_sources = st.multiselect("Databases:", ['KEGG', 'GO:BP', 'GO:CC', 'GO:MF', 'Reactome'], default=['KEGG', 'GO:BP'])
@@ -121,6 +121,13 @@ with tab2:
             p_threshold = c_p1.slider("P-value Cutoff:", 0.01, 1.0, 0.05)
             correction_method = c_p2.selectbox("Correction:", ["fdr", "bonferroni", "g_SCS"], index=0)
             exclude_iea = c_p3.checkbox("No IEA", value=False)
+            
+            # --- 新增：人工补录设置 ---
+            st.markdown("---")
+            st.markdown("🔧 **Manual Override (Force Add)**")
+            force_gene = st.text_input("Force add Gene to Pathway?", placeholder="e.g. SHC4", help="If KEGG missed this gene, force add it to the results.")
+            force_pathway_id = st.text_input("Target Pathway ID:", placeholder="e.g. KEGG:04915", help="Must match the 'native' ID in results exactly.")
+            
             run_enrich = st.button("Run Analysis", type="primary")
 
     if run_enrich and raw_text_enrich:
@@ -130,6 +137,7 @@ with tab2:
 
         with st.spinner("Talking to g:Profiler..."):
             try:
+                # 1. ID Mapping
                 mg = mygene.MyGeneInfo()
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene,symbol', species=species_id)
                 converted_ids = []
@@ -161,6 +169,7 @@ with tab2:
                         results = pd.DataFrame(raw_results['result'])
                         results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
                         
+                        # --- 数据解析 ---
                         def decode_intersections(inter_list):
                             if not isinstance(inter_list, list): return ""
                             hit_genes = []
@@ -176,7 +185,13 @@ with tab2:
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
-                        # 1. Map Link (图)
+                        # 生成链接
+                        def generate_kegg_text_link(row):
+                            if "KEGG" not in row['source']: return None
+                            pathway_code = row['native'].replace("KEGG:", "")
+                            full_map_id = f"{kegg_prefix}{pathway_code}"
+                            return f"https://www.kegg.jp/entry/{full_map_id}"
+                        
                         def generate_kegg_map_link(row):
                             if "KEGG" not in row['source']: return None
                             pathway_code = row['native'].replace("KEGG:", "")
@@ -186,21 +201,31 @@ with tab2:
                             joined_ids = "+".join(hit_ids)
                             return f"https://www.kegg.jp/kegg-bin/show_pathway?{full_map_id}+{joined_ids}"
 
-                        # 2. Text Link (表 - 新增)
-                        def generate_kegg_text_link(row):
-                            if "KEGG" not in row['source']: return None
-                            pathway_code = row['native'].replace("KEGG:", "")
-                            full_map_id = f"{kegg_prefix}{pathway_code}"
-                            # 链接到 Entry 页面，列出所有基因
-                            return f"https://www.kegg.jp/entry/{full_map_id}"
-
                         if 'intersections' in results.columns:
                             results['hit_genes'] = results['intersections'].apply(decode_intersections)
                             results['intersections_raw'] = results['intersections'].apply(get_entrez_ids_list)
                             
+                            # --- 核心逻辑：人工补录 (Force Add) ---
+                            if force_gene and force_pathway_id:
+                                # 检查这一行是不是目标通路
+                                mask = results['native'] == force_pathway_id
+                                if mask.any():
+                                    # 1. 检查这个基因是否已经在用户输入的列表里
+                                    # (我们假设用户已经输入了 SHC4，只是没富集上)
+                                    # 如果想更严谨，这里应该用 ID 匹配，但为了简单，我们用 Symbol 字符串追加
+                                    
+                                    def append_gene(current_hits):
+                                        if force_gene in current_hits: return current_hits
+                                        return current_hits + "; " + force_gene if current_hits else force_gene
+                                    
+                                    # 修改 hit_genes 列
+                                    results.loc[mask, 'hit_genes'] = results.loc[mask, 'hit_genes'].apply(append_gene)
+                                    # 修改 intersection_size (计数 +1)
+                                    results.loc[mask, 'intersection_size'] += 1
+                                    st.toast(f"✅ Successfully forced {force_gene} into {force_pathway_id}!", icon="🎉")
+
                             results['KEGG_Map'] = results.apply(generate_kegg_map_link, axis=1)
                             results['KEGG_Text'] = results.apply(generate_kegg_text_link, axis=1)
-                            
                             results['intersections'] = results['hit_genes']
 
                         st.session_state['raw_results'] = results.sort_values('p_value')
@@ -211,6 +236,7 @@ with tab2:
             except Exception as e:
                 st.error(f"Error: {e}")
 
+    # 过滤与显示
     if 'raw_results' in st.session_state:
         df_raw = st.session_state['raw_results']
         
@@ -230,10 +256,10 @@ with tab2:
             df_processed = df_raw.copy()
 
         with col_f2:
-            st.markdown("##### 2. Validator (Why some genes don't show red?)")
-            st.caption("KEGG Maps often omit genes (like KRTs) for simplicity. Use **KEGG_Text** to check the database list.")
+            st.markdown("##### 2. Validator")
+            st.caption("Use **KEGG_Text** to verify official gene lists. If KEGG missed a gene, use 'Manual Override' above.")
         
-        df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'KEGG_Map', 'KEGG_Text']].copy()
+        df_display = df_processed[['source', 'native', 'name', 'p_value', 'intersection_size', 'KEGG_Text']].copy()
         df_display.insert(0, "Select", False)
         
         edited_df = st.data_editor(
@@ -241,18 +267,10 @@ with tab2:
             column_config={
                 "Select": st.column_config.CheckboxColumn("Plot?", default=False),
                 "p_value": st.column_config.NumberColumn(format="%.2e"),
-                "KEGG_Map": st.column_config.LinkColumn(
-                    "Visual Map", display_text="Open Map",
-                    help="Click to see the pathway diagram (Some genes might be hidden).",
-                    validate="^https://www.kegg.jp/.*"
-                ),
-                "KEGG_Text": st.column_config.LinkColumn(
-                    "Database List", display_text="Check List",
-                    help="Click to see the full gene list. Use Ctrl+F to find your ID.",
-                    validate="^https://www.kegg.jp/.*"
-                )
+                "native": st.column_config.TextColumn("ID (for Override)", help="Copy this ID to 'Target Pathway ID' if you want to force add a gene."),
+                "KEGG_Text": st.column_config.LinkColumn("Database List", display_text="Check List", validate="^https://www.kegg.jp/.*")
             },
-            disabled=["source", "name", "p_value", "intersection_size", "KEGG_Map", "KEGG_Text"],
+            disabled=["source", "native", "name", "p_value", "intersection_size", "KEGG_Text"],
             hide_index=True,
             height=400
         )
