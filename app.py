@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.3 - Link Fix)")
+st.title("🔬 Omics Data Assistant (v5.4 - Dual Validator)")
 
 # --- 2. 全局物种映射 ---
 species_map = {
@@ -105,7 +105,7 @@ with tab1:
                     st.error(f"Error: {e}")
 
 # =================================================================================
-# Tab 2: 富集分析 (修复链接格式)
+# Tab 2: 富集分析 (新增文字版验证)
 # =================================================================================
 with tab2:
     st.header("Enrichment Analysis")
@@ -176,22 +176,31 @@ with tab2:
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
-                        def generate_kegg_link(row):
+                        # 1. Map Link (图)
+                        def generate_kegg_map_link(row):
                             if "KEGG" not in row['source']: return None
                             pathway_code = row['native'].replace("KEGG:", "")
                             full_map_id = f"{kegg_prefix}{pathway_code}"
                             hit_ids = row['intersections_raw']
                             if not hit_ids: return None
                             joined_ids = "+".join(hit_ids)
-                            
-                            # --- 关键修复：改用 show_pathway 接口 ---
-                            url = f"https://www.kegg.jp/kegg-bin/show_pathway?{full_map_id}+{joined_ids}"
-                            return url
+                            return f"https://www.kegg.jp/kegg-bin/show_pathway?{full_map_id}+{joined_ids}"
+
+                        # 2. Text Link (表 - 新增)
+                        def generate_kegg_text_link(row):
+                            if "KEGG" not in row['source']: return None
+                            pathway_code = row['native'].replace("KEGG:", "")
+                            full_map_id = f"{kegg_prefix}{pathway_code}"
+                            # 链接到 Entry 页面，列出所有基因
+                            return f"https://www.kegg.jp/entry/{full_map_id}"
 
                         if 'intersections' in results.columns:
                             results['hit_genes'] = results['intersections'].apply(decode_intersections)
                             results['intersections_raw'] = results['intersections'].apply(get_entrez_ids_list)
-                            results['KEGG_Link'] = results.apply(generate_kegg_link, axis=1)
+                            
+                            results['KEGG_Map'] = results.apply(generate_kegg_map_link, axis=1)
+                            results['KEGG_Text'] = results.apply(generate_kegg_text_link, axis=1)
+                            
                             results['intersections'] = results['hit_genes']
 
                         st.session_state['raw_results'] = results.sort_values('p_value')
@@ -221,10 +230,10 @@ with tab2:
             df_processed = df_raw.copy()
 
         with col_f2:
-            st.markdown("##### 2. Manual Selection & Validator")
-            st.info("💡 **Tip:** Click **Open Map** to see red-highlighted genes on the official KEGG website.")
+            st.markdown("##### 2. Validator (Why some genes don't show red?)")
+            st.caption("KEGG Maps often omit genes (like KRTs) for simplicity. Use **KEGG_Text** to check the database list.")
         
-        df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'KEGG_Link']].copy()
+        df_display = df_processed[['source', 'name', 'p_value', 'intersection_size', 'KEGG_Map', 'KEGG_Text']].copy()
         df_display.insert(0, "Select", False)
         
         edited_df = st.data_editor(
@@ -232,14 +241,18 @@ with tab2:
             column_config={
                 "Select": st.column_config.CheckboxColumn("Plot?", default=False),
                 "p_value": st.column_config.NumberColumn(format="%.2e"),
-                "KEGG_Link": st.column_config.LinkColumn(
-                    "KEGG Validator", 
-                    help="Click to open KEGG website with genes highlighted",
-                    validate="^https://www.kegg.jp/.*", 
-                    display_text="Open Map"
+                "KEGG_Map": st.column_config.LinkColumn(
+                    "Visual Map", display_text="Open Map",
+                    help="Click to see the pathway diagram (Some genes might be hidden).",
+                    validate="^https://www.kegg.jp/.*"
+                ),
+                "KEGG_Text": st.column_config.LinkColumn(
+                    "Database List", display_text="Check List",
+                    help="Click to see the full gene list. Use Ctrl+F to find your ID.",
+                    validate="^https://www.kegg.jp/.*"
                 )
             },
-            disabled=["source", "name", "p_value", "intersection_size", "KEGG_Link"],
+            disabled=["source", "name", "p_value", "intersection_size", "KEGG_Map", "KEGG_Text"],
             hide_index=True,
             height=400
         )
