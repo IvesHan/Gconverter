@@ -8,7 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # --- 1. 页面配置 ---
-st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
+st.set_page_config(page_title="Omics Analysis Tool——by Ives", layout="wide", page_icon="🔬")
 st.title("🔬 Omics Data Assistant (v5.2 - KEGG Validator)")
 
 # --- 2. 全局物种映射 (增加 KEGG 前缀) ---
@@ -343,3 +343,4 @@ with tab2:
             e3.download_button("📥 Plot (PDF)", pdf_bytes, "enrichment_plot.pdf", "application/pdf")
         except Exception as e:
             e3.error(f"PDF Error: {e}")
+
