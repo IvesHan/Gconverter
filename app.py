@@ -6,11 +6,11 @@ import math
 import requests
 import plotly.express as px
 import plotly.graph_objects as go
-import textwrap # 用于文字换行
+import textwrap
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.6 - Copy Ready)")
+st.title("🔬 Omics Data Assistant (v5.7 - Map & Highlight)")
 
 # --- 2. 全局物种映射 ---
 species_map = {
@@ -183,18 +183,16 @@ with tab2:
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
-                        def generate_kegg_text_link(row):
+                        # --- 核心修改：生成带高亮的 KEGG Map 链接 ---
+                        def generate_highlighted_kegg_link(row):
                             if "KEGG" not in row['source']: return None
                             pathway_code = row['native'].replace("KEGG:", "")
                             full_map_id = f"{kegg_prefix}{pathway_code}"
-                            return f"https://www.kegg.jp/entry/{full_map_id}"
-                        
-                        def generate_kegg_map_link(row):
-                            if "KEGG" not in row['source']: return None
-                            pathway_code = row['native'].replace("KEGG:", "")
-                            full_map_id = f"{kegg_prefix}{pathway_code}"
+                            
                             hit_ids = row['intersections_raw']
-                            if not hit_ids: return None
+                            if not hit_ids: return f"https://www.kegg.jp/pathway/{full_map_id}" # 如果没有hit，给个普通链接
+                            
+                            # 拼接 URL: map_id + id1 + id2 ... (KEGG会自动高亮)
                             joined_ids = "+".join(hit_ids)
                             return f"https://www.kegg.jp/kegg-bin/show_pathway?{full_map_id}+{joined_ids}"
 
@@ -212,8 +210,8 @@ with tab2:
                                     results.loc[mask, 'intersection_size'] += 1
                                     st.toast(f"✅ Forced {force_gene} into {force_pathway_id}!", icon="🎉")
 
-                            results['KEGG_Map'] = results.apply(generate_kegg_map_link, axis=1)
-                            results['KEGG_Text'] = results.apply(generate_kegg_text_link, axis=1)
+                            # 生成高亮链接
+                            results['KEGG_Highlighted_Map'] = results.apply(generate_highlighted_kegg_link, axis=1)
                             results['intersections'] = results['hit_genes']
 
                         st.session_state['raw_results'] = results.sort_values('p_value')
@@ -228,7 +226,7 @@ with tab2:
         df_raw = st.session_state['raw_results']
         
         st.divider()
-        st.subheader("Step 2: Filter & Validate")
+        st.subheader("Step 2: Filter & Highlighted Map")
         
         col_f1, col_f2 = st.columns([1, 2])
         with col_f1:
@@ -243,20 +241,29 @@ with tab2:
             df_processed = df_raw.copy()
 
         with col_f2:
-            st.markdown("##### 2. Validator")
+            st.markdown("##### 2. Check & Download")
+            st.caption("Click **Open Map** to see red-highlighted genes. To save as PDF: press **Ctrl+P** on the KEGG page.")
         
-        df_display = df_processed[['source', 'native', 'name', 'p_value', 'intersection_size', 'KEGG_Text']].copy()
+        # 准备显示用的表格
+        df_display = df_processed[['source', 'native', 'name', 'p_value', 'intersection_size', 'KEGG_Highlighted_Map']].copy()
         df_display.insert(0, "Select", False)
         
+        # --- 编辑表格配置 ---
         edited_df = st.data_editor(
             df_display,
             column_config={
                 "Select": st.column_config.CheckboxColumn("Plot?", default=False),
                 "p_value": st.column_config.NumberColumn(format="%.2e"),
                 "native": st.column_config.TextColumn("ID"),
-                "KEGG_Text": st.column_config.LinkColumn("Check List", display_text="Open", validate="^https://www.kegg.jp/.*")
+                # 这里把原来的 Link 改名为 Highlighted Map
+                "KEGG_Highlighted_Map": st.column_config.LinkColumn(
+                    "Highlighted Map", 
+                    display_text="Open Map", 
+                    help="Opens KEGG website with YOUR genes highlighted in RED.",
+                    validate="^https://www.kegg.jp/.*"
+                )
             },
-            disabled=["source", "native", "name", "p_value", "intersection_size", "KEGG_Text"],
+            disabled=["source", "native", "name", "p_value", "intersection_size", "KEGG_Highlighted_Map"],
             hide_index=True,
             height=400
         )
@@ -297,9 +304,6 @@ with tab2:
 
         with viz_c2:
             plot_data['short_name'] = plot_data['name']
-            
-            # --- 核心：处理悬停文本 (Hover Text) ---
-            # 使用 textwrap 将长长的基因列表每 50 个字符换一行
             plot_data['hover_genes'] = plot_data['hit_genes'].apply(
                 lambda x: "<br>".join(textwrap.wrap(str(x), width=50)) if x else ""
             )
@@ -308,13 +312,11 @@ with tab2:
                 fig = px.scatter(
                     plot_data, x="intersection_size", y="short_name", size="intersection_size", 
                     color="neg_log10_p", 
-                    # 使用 custom_data 把处理好的 genes 传进去
                     custom_data=['hover_genes', 'p_value', 'source'],
                     color_continuous_scale=color_scale,
                     labels={"intersection_size": "Count", "short_name": "Pathway", "neg_log10_p": "-log10(P)"},
                     title=plot_title
                 )
-                # 自定义 Hover 模板
                 fig.update_traces(
                     hovertemplate="<b>%{y}</b><br>" +
                                   "Count: %{x}<br>" +
@@ -347,10 +349,8 @@ with tab2:
             
             st.plotly_chart(fig, use_container_width=True)
 
-            # --- 核心：解决复制问题的区域 ---
             with st.expander("📋 Copy Gene Lists (Click to Expand)", expanded=False):
-                st.caption("Copying from the tooltip is difficult. Use the table below to easily copy gene lists for the plotted pathways.")
-                # 展示一个精简的表格，专门用于复制
+                st.caption("Use the table below to copy gene lists.")
                 copy_df = plot_data[['name', 'hit_genes']].copy()
                 st.dataframe(copy_df, hide_index=True, use_container_width=True)
 
