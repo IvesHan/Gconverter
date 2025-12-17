@@ -6,10 +6,11 @@ import math
 import requests
 import plotly.express as px
 import plotly.graph_objects as go
+import textwrap # 用于文字换行
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="Omics Analysis Tool", layout="wide", page_icon="🔬")
-st.title("🔬 Omics Data Assistant (v5.5 - Custom Override)")
+st.title("🔬 Omics Data Assistant (v5.6 - Copy Ready)")
 
 # --- 2. 全局物种映射 ---
 species_map = {
@@ -105,7 +106,7 @@ with tab1:
                     st.error(f"Error: {e}")
 
 # =================================================================================
-# Tab 2: 富集分析 (新增人工补录)
+# Tab 2: 富集分析
 # =================================================================================
 with tab2:
     st.header("Enrichment Analysis")
@@ -122,11 +123,10 @@ with tab2:
             correction_method = c_p2.selectbox("Correction:", ["fdr", "bonferroni", "g_SCS"], index=0)
             exclude_iea = c_p3.checkbox("No IEA", value=False)
             
-            # --- 新增：人工补录设置 ---
             st.markdown("---")
             st.markdown("🔧 **Manual Override (Force Add)**")
-            force_gene = st.text_input("Force add Gene to Pathway?", placeholder="e.g. SHC4", help="If KEGG missed this gene, force add it to the results.")
-            force_pathway_id = st.text_input("Target Pathway ID:", placeholder="e.g. KEGG:04915", help="Must match the 'native' ID in results exactly.")
+            force_gene = st.text_input("Force add Gene to Pathway?", placeholder="e.g. SHC4")
+            force_pathway_id = st.text_input("Target Pathway ID:", placeholder="e.g. KEGG:04915")
             
             run_enrich = st.button("Run Analysis", type="primary")
 
@@ -137,7 +137,6 @@ with tab2:
 
         with st.spinner("Talking to g:Profiler..."):
             try:
-                # 1. ID Mapping
                 mg = mygene.MyGeneInfo()
                 map_res = mg.querymany(raw_gene_list, scopes='symbol,entrezgene,ensembl.gene,alias', fields='entrezgene,symbol', species=species_id)
                 converted_ids = []
@@ -169,7 +168,6 @@ with tab2:
                         results = pd.DataFrame(raw_results['result'])
                         results['neg_log10_p'] = results['p_value'].apply(lambda x: -math.log10(x))
                         
-                        # --- 数据解析 ---
                         def decode_intersections(inter_list):
                             if not isinstance(inter_list, list): return ""
                             hit_genes = []
@@ -185,7 +183,6 @@ with tab2:
                                     ids.append(unique_converted_ids[idx])
                             return ids
 
-                        # 生成链接
                         def generate_kegg_text_link(row):
                             if "KEGG" not in row['source']: return None
                             pathway_code = row['native'].replace("KEGG:", "")
@@ -205,24 +202,15 @@ with tab2:
                             results['hit_genes'] = results['intersections'].apply(decode_intersections)
                             results['intersections_raw'] = results['intersections'].apply(get_entrez_ids_list)
                             
-                            # --- 核心逻辑：人工补录 (Force Add) ---
                             if force_gene and force_pathway_id:
-                                # 检查这一行是不是目标通路
                                 mask = results['native'] == force_pathway_id
                                 if mask.any():
-                                    # 1. 检查这个基因是否已经在用户输入的列表里
-                                    # (我们假设用户已经输入了 SHC4，只是没富集上)
-                                    # 如果想更严谨，这里应该用 ID 匹配，但为了简单，我们用 Symbol 字符串追加
-                                    
                                     def append_gene(current_hits):
                                         if force_gene in current_hits: return current_hits
                                         return current_hits + "; " + force_gene if current_hits else force_gene
-                                    
-                                    # 修改 hit_genes 列
                                     results.loc[mask, 'hit_genes'] = results.loc[mask, 'hit_genes'].apply(append_gene)
-                                    # 修改 intersection_size (计数 +1)
                                     results.loc[mask, 'intersection_size'] += 1
-                                    st.toast(f"✅ Successfully forced {force_gene} into {force_pathway_id}!", icon="🎉")
+                                    st.toast(f"✅ Forced {force_gene} into {force_pathway_id}!", icon="🎉")
 
                             results['KEGG_Map'] = results.apply(generate_kegg_map_link, axis=1)
                             results['KEGG_Text'] = results.apply(generate_kegg_text_link, axis=1)
@@ -236,7 +224,6 @@ with tab2:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # 过滤与显示
     if 'raw_results' in st.session_state:
         df_raw = st.session_state['raw_results']
         
@@ -257,7 +244,6 @@ with tab2:
 
         with col_f2:
             st.markdown("##### 2. Validator")
-            st.caption("Use **KEGG_Text** to verify official gene lists. If KEGG missed a gene, use 'Manual Override' above.")
         
         df_display = df_processed[['source', 'native', 'name', 'p_value', 'intersection_size', 'KEGG_Text']].copy()
         df_display.insert(0, "Select", False)
@@ -267,8 +253,8 @@ with tab2:
             column_config={
                 "Select": st.column_config.CheckboxColumn("Plot?", default=False),
                 "p_value": st.column_config.NumberColumn(format="%.2e"),
-                "native": st.column_config.TextColumn("ID (for Override)", help="Copy this ID to 'Target Pathway ID' if you want to force add a gene."),
-                "KEGG_Text": st.column_config.LinkColumn("Database List", display_text="Check List", validate="^https://www.kegg.jp/.*")
+                "native": st.column_config.TextColumn("ID"),
+                "KEGG_Text": st.column_config.LinkColumn("Check List", display_text="Open", validate="^https://www.kegg.jp/.*")
             },
             disabled=["source", "native", "name", "p_value", "intersection_size", "KEGG_Text"],
             hide_index=True,
@@ -312,20 +298,43 @@ with tab2:
         with viz_c2:
             plot_data['short_name'] = plot_data['name']
             
+            # --- 核心：处理悬停文本 (Hover Text) ---
+            # 使用 textwrap 将长长的基因列表每 50 个字符换一行
+            plot_data['hover_genes'] = plot_data['hit_genes'].apply(
+                lambda x: "<br>".join(textwrap.wrap(str(x), width=50)) if x else ""
+            )
+
             if plot_type == "Dot Plot":
                 fig = px.scatter(
                     plot_data, x="intersection_size", y="short_name", size="intersection_size", 
-                    color="neg_log10_p", hover_data=["p_value", "source", "hit_genes"],
+                    color="neg_log10_p", 
+                    # 使用 custom_data 把处理好的 genes 传进去
+                    custom_data=['hover_genes', 'p_value', 'source'],
                     color_continuous_scale=color_scale,
                     labels={"intersection_size": "Count", "short_name": "Pathway", "neg_log10_p": "-log10(P)"},
                     title=plot_title
                 )
+                # 自定义 Hover 模板
+                fig.update_traces(
+                    hovertemplate="<b>%{y}</b><br>" +
+                                  "Count: %{x}<br>" +
+                                  "P-value: %{customdata[1]:.2e}<br>" +
+                                  "Source: %{customdata[2]}<br><br>" +
+                                  "<b>Genes:</b><br>%{customdata[0]}<extra></extra>"
+                )
             else:
                 fig = px.bar(
                     plot_data, x="neg_log10_p", y="short_name", color="intersection_size", orientation='h',
-                    color_continuous_scale=color_scale, hover_data=["hit_genes"],
+                    color_continuous_scale=color_scale, 
+                    custom_data=['hover_genes', 'intersection_size'],
                     labels={"neg_log10_p": "-log10(P)", "short_name": "Pathway", "intersection_size": "Count"},
                     title=plot_title
+                )
+                fig.update_traces(
+                    hovertemplate="<b>%{y}</b><br>" +
+                                  "-log10(P): %{x:.2f}<br>" +
+                                  "Count: %{customdata[1]}<br><br>" +
+                                  "<b>Genes:</b><br>%{customdata[0]}<extra></extra>"
                 )
             
             fig.update_layout(
@@ -338,10 +347,17 @@ with tab2:
             
             st.plotly_chart(fig, use_container_width=True)
 
+            # --- 核心：解决复制问题的区域 ---
+            with st.expander("📋 Copy Gene Lists (Click to Expand)", expanded=False):
+                st.caption("Copying from the tooltip is difficult. Use the table below to easily copy gene lists for the plotted pathways.")
+                # 展示一个精简的表格，专门用于复制
+                copy_df = plot_data[['name', 'hit_genes']].copy()
+                st.dataframe(copy_df, hide_index=True, use_container_width=True)
+
         st.markdown("### Export")
         e1, e2, e3 = st.columns(3)
         
-        out_df = df_final_plot.drop(columns=['neg_log10_p', 'intersections_raw'], errors='ignore')
+        out_df = df_final_plot.drop(columns=['neg_log10_p', 'intersections_raw', 'hover_genes'], errors='ignore')
         output_excel = io.BytesIO()
         with pd.ExcelWriter(output_excel, engine='xlsxwriter') as writer:
             out_df.to_excel(writer, index=False)
