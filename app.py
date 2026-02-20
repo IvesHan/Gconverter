@@ -271,7 +271,7 @@ with tab2:
         selected_indices = edited_df[edited_df["Select"]].index
         
         if len(selected_indices) > 0:
-            df_final_plot = df_processed.iloc[selected_indices].copy()
+            df_final_plot = df_processed.loc[selected_indices].copy()
             auto_top_n = False
         else:
             df_final_plot = df_processed.copy()
@@ -373,3 +373,4 @@ with tab2:
             e3.download_button("📥 Plot (PDF)", pdf_bytes, "enrichment_plot.pdf", "application/pdf")
         except Exception as e:
             e3.error(f"PDF Error: {e}")
+
